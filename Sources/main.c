@@ -32,6 +32,18 @@
 #include "stdio.h"
 #include "string.h"
 
+#include "UART0.h"
+#include "support_common.h"  // include peripheral declarations and more; 
+//#include "malloc_wrapper.h"
+
+#include <stdlib.h>
+
+// global vars for Exercise08
+char     msginput[]  = "\r\nZahl eingeben (0 fuer Ende): "; 
+char     msgfehler[] = "\nFehler bei malloc() !\n";
+void     *anker = NULL;
+
+// the exercises
 void exOne();
 void exTwo();
 void exTwoA();
@@ -41,9 +53,9 @@ void exFive();
 void exSix();
 void exSeven();
 void exSevenA();
+void exEight();
 
 void * mymemcopy ( void *, const void *, size_t);
-
 
 
 // - Bitte darauf achten, dass am Coldfire-Serial Port ein  
@@ -54,13 +66,18 @@ void main(void)
 {
 	int counter = 0;
 	
+	int wort = 0xABCD;
+	
+	
 	/***** Processor Expert internal initialization. DON'T REMOVE THIS CODE!!! ***/
 	PE_low_level_init(); /********************************************************/
 	/***** End of Processor Expert internal initialization. **********************/
 	
-  
+	
 	// call the exercise you want to run here:
-	exSevenA();
+	exEight();
+	
+	
 	
 
 	// Als Ende-Behandlung nachfolgend ein einfacher Leerlauf-Prozess 
@@ -89,6 +106,7 @@ void exOne()
 		  loop: 
 			  move.b (a1)+, d0	// move the next character to the d0 register
 			  tst.b d0			// check if the character is 0 to see if we are at the end of the string
+			  	  	  	  	  	// cmp.l #0, d0 would also work (cmp.b not because that's only in ISA_B)
 			  beq end_loop		// if so, end the loop
 			  move.b d0, -(sp)  // else we push the character to the stack
 			  jsr TERM_Write	// and print it out
@@ -144,6 +162,8 @@ void exTwo()
 
 void exTwoA()
 {
+	//TODO: check with local and global variables
+	
 	char* pointerString = "Ich bin ein String, der als char* deklariert wurde!";
 	char arrayString[] = "Ich bin ein String, der als char[] deklariert wurde!";
 	
@@ -403,6 +423,8 @@ void exSeven()
 		bra userstart
 		betriebssystem:
 			
+		//TODO: save registers and restore them when we are done
+		
 			// writing the string "Betriebssystem"
 			move.l usp, a3
 			move.l (a3), -(sp)
@@ -426,7 +448,7 @@ void exSeven()
 			move.w d0, sr
 			
 			move.l string, -(sp)
-			trap #1
+			trap #1		//supervisor call
 			adda.l #4, sp
 	}
 }
@@ -470,6 +492,140 @@ void exSevenA()
 			moveq.l #1, d3
 		
 	}
+}
+
+void exEight()
+{
+	
+
+#if (CONSOLE_IO_SUPPORT || ENABLE_UART_SUPPORT)
+
+	           
+	asm {
+		
+		schleife:  
+		
+		// Zahl einlesen (Ende vereinfachend mit Wert 0)
+		//----------------------------------------------
+		lea msginput, a2
+		move.l a2, -(sp)		// there is a bug here. this changes the value of "anker"
+		jsr TERM_WriteString
+		adda.l #4, sp
+		
+		jsr INOUT_ReadInt 	// getting an integer value from the terminal
+							// the entered integer value is now in d0	
+		clr.l d5			// clearing the register to prevent bugs
+		move.w d0, d5		// saving the integer value in d2
+		tst.w d0			// we end the input when the integer is 0
+		beq ausgabe
+		
+		// Einzuhängendes Element aufbauen
+		// -------------------------------
+		// Tipp: Die Funktion malloc hat "register_abi", nicht "compact_abi". 
+		// Das bedeutet, dass die Parameterversorgung nicht über den Stack erfolgt, 
+		// sondern über Register, im vorliegenden Fall über Register D0.
+		
+		moveq.l #6, d0
+		jsr malloc			// a0 is now the starting address of the reserved space
+							// so a0 is the value and a0+2 is the pointer to the next value
+		adda.l #4, sp
+		
+		move.w d5, (a0)		// moving the int value to the start of the reserved space (first two bytes)
+		clr.l 2(a0)			// moving the address 0 to the last 4 bytes of our reserved space (0 indicates the end of the list)
+		
+		
+		
+		//          Ergebnis:
+		//                  ___________ 
+		//          a0 -->  |zahl|  0 | 
+		//                  ¯¯¯¯¯¯¯¯¯¯¯    
+		 
+		
+		// Organisation der Listeniteration
+		//
+		// a2 zeigt auf das aktuelle Element (oder 0 für Listenende)
+		// a3 zeigt   a u f   d e n   Z e i g e r   im vorhergehenden Element
+		//
+		//                              a3         a2 
+		//                                \         \
+		//  anker:                         \         \
+		//  ______     ___________     _____V_____    V___________     ___________
+		//  |    | --> |zahl|next| --> |zahl|next| --> |zahl|next| --> |zahl|  0 |
+		//  ¯¯¯¯¯¯     ¯¯¯¯¯¯¯¯¯¯¯     ¯¯¯¯¯¯¯¯¯¯¯     ¯¯¯¯¯¯¯¯¯¯¯     ¯¯¯¯¯¯¯¯¯¯¯
+		//
+		//    Funtioniert 
+		//       + auch am Listenende (a3 zeigt auf 0, a2 ist 0)
+		//       + auch bei Einfügen vor dem ersten Element 
+		//                           (a3 zeigt auf Anker, a2 auf das erste Element
+		//       + auch bei leerer Liste (a3 zeigt auf Anker, Anker und a2 sind 0)
+		
+		
+		// suchen der Einfügestelle
+		//-------------------------
+		
+		// Iterator-Paar initialisieren
+		lea anker, a3
+		move.l (a3), a2
+
+		
+		naechstes:
+		
+		tst.l a2			// check if we are at the end of the list (address of next element is 0)
+		beq gefunden		// and if so, we "found" our element
+		
+		// now we compare the value we want to add to the value of the next element
+		// to find out if we reached the point where we want to add the new element
+		move.w (a2), d4		// d4 is the next element value
+		move.w (a0), d5		// d5 is the insert element value
+		cmp.l d5, d4 		
+		bgt gefunden 		// we go further into the list if the value to be added is bigger then the next element's
+		
+		move.l a2, a3		
+		adda.l #2, a3		// adding two, so we are at the point where the address of our next element is stored
+		move.l (a3), a2
+		
+		bra naechstes
+		
+		
+		// Einfügestelle gefunden: Objekt einhängen
+		//-----------------------------------------                
+		gefunden:
+			move.l a0, (a3)		// the prev element ((a3)) now points to our new element (a0)
+			move.l a2, 2(a0)	// the new element now points at the "old next" element
+
+		
+		bra     schleife      	// next value
+			  
+		
+		// gesamte Liste ausgeben
+		//-----------------------
+		ausgabe: 
+			lea anker, a3		// set the starting point of the list
+			move.l (a3), a2
+		
+		ausgabeLoop:
+			move.w (a2), -(sp)	//write the value to the terminal
+			jsr INOUT_WriteInt
+			adda.l #2, sp
+			
+			move.l a2, a3		
+			adda.l #2, a3		// adding two, so we are at the point where the address of our next element is stored
+			move.l (a3), a2
+			tst.l (a3)			// checking if we are at the end of the list (address 0)
+			bne ausgabeLoop
+
+		
+		ende:
+		
+		move.l #0, d1
+		move.l d1, (anker)
+		bra schleife
+
+	}
+
+#endif
+
+
 }
 
 
