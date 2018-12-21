@@ -54,8 +54,52 @@ void exSix();
 void exSeven();
 void exSevenA();
 void exEight();
+void exNine();
 
 void * mymemcopy ( void *, const void *, size_t);
+
+
+#define IPS 0x40000000
+
+#define PNQPAR IPS + 0x100068	
+#define PTCPAR IPS + 0x10006F
+
+#define DDRTC IPS + 0x100027 	// 8bit register
+#define DDRNQ IPS + 0x100020
+
+#define PORTTC IPS + 0x10000F
+#define PORTNQ IPS + 0x100038
+
+
+//!!!!! EXERCISE 9d !!!!!
+/* Definitionen für MCF_GPIO Port NQ */
+#define MNP_GPIO_PORTNQ      0x40100008
+#define MNP_GPIO_DDRNQ       0x40100020
+#define MNP_GPIO_SETNQ       0x40100038
+#define MNP_GPIO_CLRNQ       0x40100050
+#define MNP_GPIO_PNQPAR      0x40100068
+#define MNP_GPIO_PORTNQ_NQ1  0x02
+#define MNP_GPIO_PORTNQ_NQ5  0x20
+
+
+/* Definitionen für MCF_GPIO Port TC */
+#define MNP_GPIO_PORTTC      0x4010000F
+#define MNP_GPIO_DDRTC       0x40100027
+#define MNP_GPIO_SETTC       0x4010003F
+#define MNP_GPIO_CLRTC       0x40100057
+#define MNP_GPIO_PTCPAR      0x4010006F
+#define MNP_GPIO_PORTTC_TC0  0x1
+#define MNP_GPIO_PORTTC_TC1  0x2
+#define MNP_GPIO_PORTTC_TC2  0x4
+#define MNP_GPIO_PORTTC_TC3  0x8
+
+
+/* Definitionen für MCF_Edge Port */
+#define MNP_INTC0_IMRL       0x40000C0C  // Interrupt Mask Register 
+#define MNP_EPORT_EPPAR      0x40130000  // Edge control register
+#define MNP_EPORT_EPIER      0x40130003  // Edge Port Interrupt Enable Reg
+#define MNP_EPORT_EPFR       0x40130006  // Edge Port Flag Register 
+// !!!!! EX 9d END !!!!!
 
 
 // - Bitte darauf achten, dass am Coldfire-Serial Port ein  
@@ -66,17 +110,145 @@ void main(void)
 {
 	int counter = 0;
 	
-	int wort = 0xABCD;
-	
-	
 	/***** Processor Expert internal initialization. DON'T REMOVE THIS CODE!!! ***/
 	PE_low_level_init(); /********************************************************/
 	/***** End of Processor Expert internal initialization. **********************/
 	
 	
-	// call the exercise you want to run here:
-	exEight();
 	
+    asm 
+    {
+         /* MCF52259RM.pdf
+         - SW1 and SW2 verbunden mit PNQPAR5 and PNQPAR1 (Quad function pins!!)
+         - LED's 1-4 verbunden mit DDRTC0-DDRTC3
+         */
+            
+        /* LEDs als digitale Ausgabe konfigurieren ==========================        bekannt         */
+         /* MCF52259RM.pdf
+         - Port Data Direction auf output Funktion setzen 
+           (15.6.2 Port Data Direction Registers (DDRn))
+         - Pin Assignment auf GPIO Funktion setzen
+           (15.6.5.1 Dual-Function Pin Assignment Registers)
+        - Output Data Register zurücksetzen 
+          (15.6.1 Port Output Data Registers (PORTn))
+         */
+         
+         clr.b    MNP_GPIO_PTCPAR        //GPIO Funktion (=0)
+         move.b   #0xf, d0               //output Funktion (=1)
+         move.b   d0, MNP_GPIO_DDRTC
+         clr.b    MNP_GPIO_CLRTC        //LEDS OFF, siehe Figure 15-3
+         /* LEDs als digitale Ausgabe konfigurieren ==========================       bekannt (Ende) */
+
+         
+         
+        /* Taster als digitale Eingabe konfigurieren  ============================= */
+        /* MCF52259RM.pdf
+         - Pin Assignment auf IRQ function (primary function) 
+           (15.6.5.3 Port NQ Pin Assignment Register (PNQPAR))
+         - Port Data Direction Löschen für input function 
+           (15.6.2 Port Data Direction Registers (DDRn))
+         - Output Data Register löschen 
+           (15.6.1 Port Output Data Registers (PORTn))
+        */
+         
+        
+      // Achtung: Andere Funktion für NQ1 und NQ5 (primary function (=IRQ), 01 statt 00)
+         move.w   MNP_GPIO_PNQPAR,d0    // NQ5 und NQ1 auf IRQ Funktion (01)
+         and.l #0xF0F0, d0
+         or.l  #0x0404, d0
+         move.w   d0, MNP_GPIO_PNQPAR
+      
+         move.b   MNP_GPIO_DDRNQ, d0   //NQ5 and NQ1 löschen für input Funktion
+         andi.l   #0xDD,d0
+         move.b   d0, MNP_GPIO_DDRNQ
+         
+         move.b   MNP_GPIO_CLRNQ,d0    //NQ5+NQ1 löschen
+         andi.l   #0xDD,d0 
+         move.b   d0, MNP_GPIO_CLRNQ
+
+      // Einhängen der Unterbrechungsantwortprogramme (interrupt service routines)
+      //   (IRQ5=sw1 / IRQ1=sw2) 
+        lea     int_handler_IRQ1, a1
+        move.l 	a1, 0x40000000+0x104	// IRQ1 Vector
+        lea     int_handler_IRQ5, a1
+        move.l 	a1, 0x40000000+0x114	// IRQ5 Vector
+
+         
+      // Einstellen rising/falling edge detection, 
+      // Einstellen auf falling edge active (MCF52259RM 17.4.1)
+        move.w (MNP_EPORT_EPPAR), d1
+        bset #3, d1
+        bclr #2, d1
+        bset #11, d1
+        bclr #10, d1
+        move.w d1, (MNP_EPORT_EPPAR)      
+      
+      // Enable EPORT Interrupts (MCF52259RM 17.4.3)              // ENABLE
+         move.w   MNP_EPORT_EPIER, d1
+         or.l  #0x00000022, d1       // 0x20=IRQ5, 0x2=IRQ1 
+         move.w   d1, MNP_EPORT_EPIER
+      
+      // enable IRQ1+5  (MCF52259RM 16.3.2)                       // ÄUSSERE MASKE
+         move.l   MNP_INTC0_IMRL, d1
+         and.l 	  #(~0x00000022), d1    //  0x20=IRQ5, 0x2=IRQ1   //diese interrupts "dürfen durch"
+         move.l   d1, MNP_INTC0_IMRL
+      
+      // Interrupts im Statusregister freigeben (CFPRM 1.5.1)     // INNERE MASKE
+         move.w	sr,d1
+		 andi.l  #~0x00000700,d1
+		 move.w	d1,sr        
+         
+        
+    loop:                       // Das ist unser Leerlaufprozess
+      bra       loop  
+      
+
+    //////////////////////////////////////////////////////////////////////////////
+    int_handler_IRQ5:      
+        move.l   d0, -(sp)     // WICHTIG!  Alle benutzten Register retten
+        move.l   d1, -(sp)
+      
+      LED1_ON:
+      move.b (MNP_GPIO_PORTTC), d1
+      or.l #0x1, d1
+      move.b d1, (MNP_GPIO_PORTTC)// LED einschalten 
+
+      // Interupt zurücksetzen (MCF52259 17.4.6)
+      move.b   #0x20,d0                    // Schreiben von 1 löscht die Bits!
+      move.b   d0, MNP_EPORT_EPFR
+      
+      move.l   (sp)+,d1      // WICHTIG!  Alle benutzten Register restaurieren
+      move.l   (sp)+,d0  
+      rte 
+        
+        
+    //////////////////////////////////////////////////////////////////////////////    
+    int_handler_IRQ1:      
+        move.l   d0, -(sp) // has to be saved when interrupts happen
+        move.l   d1, -(sp)
+        
+      LED1_OFF:  
+      move.b (MNP_GPIO_PORTTC), d1
+      bclr.b #0, d1
+      move.b d1, (MNP_GPIO_PORTTC)         // LED ausschalten
+         
+      // Interupt zurücksetzen (MCF52259 17.4.6)
+      move.b   #0x02,d0                    // Schreiben von 1 löscht die Bits! 
+      move.b   d0, MNP_EPORT_EPFR
+      
+      move.l   (sp)+,d1
+      move.l   (sp)+,d0  
+      rte
+    //////////////////////////////////////////////////////////////////////////////    
+
+
+    }
+
+	
+	
+	
+	// call the exercise you want to run here:
+	//exNine();
 	
 	
 
@@ -567,7 +739,7 @@ void exEight()
 		lea anker, a3
 		move.l (a3), a2
 
-		
+		//TODO: sign extension beim einfügen von negativen werten
 		naechstes:
 		
 		tst.l a2			// check if we are at the end of the list (address of next element is 0)
@@ -626,6 +798,104 @@ void exEight()
 #endif
 
 
+}
+
+void exNine()
+{
+	asm{
+		// initializing PNQPAR
+		clr.l d0
+		move.w (PNQPAR), d0
+		bclr #2, d0
+		bclr #3, d0
+		bclr #10, d0
+		bclr #11, d0
+		move.w d0, (PNQPAR)
+		
+		// initializing PTCPAR
+		clr.b (PTCPAR)
+		
+		// initializing DDRNQ
+		clr.l d0
+		move.b (DDRNQ), d0
+		bclr #1, d0
+		bclr #5, d0
+		move.b d0, (DDRNQ)
+		
+		// initializing DDRTC
+		clr.l d0
+		move.b (DDRTC), d0
+		bset #0, d0
+		bset #1, d0
+		bset #2, d0
+		bset #3, d0
+		move.b d0, (DDRTC)
+		
+		//----Binary counting with the LED's----
+		moveq.l #0, d5 	// d5 is the current value to be displayed from 0 to 15
+		
+		clr.l d1
+		clr.l d2
+		
+		loop:
+			move.b (PORTNQ), d1 		// d1 holds the information if the switch is pressed or not
+										// 0 is pressed, 1 is not pressed
+			
+			move.b d5, (PORTTC)			// set the LED's on/off
+			
+			btst #5, d1
+			beq waitloop				// if the switch is pressed we enter the wait loop
+			bra loop					// else we just display the same values again
+		
+			waitloop:
+				move.b (PORTNQ), d1 
+				btst #5, d1 			
+				beq waitloop			// if the switch is still pushed we wait until its not pushed anymore
+			waitloop_end:
+			
+			count:
+				addq.l #1, d5			// increasing the counter
+				cmp.l #15, d5			// if its above 15 we start at 0 again
+				ble loop
+				moveq.l #0, d5
+				bra loop
+			count_end:
+			
+		end_loop:
+		
+		//----Turning LED's off and on with each switch press----
+		// turning all the leds off
+		/*clr.l d0
+		move.b d0, (PORTTC)
+		
+		clr.l d1
+		clr.l d2
+		
+		loop:
+			move.b (PORTNQ), d1 		// d1 holds the information if the switch is pressed or not
+										// 0 is pressed, 1 is not pressed
+			btst #5, d1
+			beq waitloop				// if the switch is pressed we enter the wait loop
+			bra loop
+		
+			waitloop:
+				move.b (PORTNQ), d1 
+				btst #5, d1 			
+				beq waitloop			// if the switch is still pushed we wait until its not pushed anymore
+			waitloop_end:
+			
+			change_led:
+				move.b (PORTTC), d2		// d2 holds the LED state (on/off) information
+				// change the LED's states
+				bchg #0, d2
+				bchg #1, d2
+				bchg #2, d2
+				bchg #3, d2
+				move.b d2, (PORTTC)
+				bra loop
+			
+		end_loop:*/
+	}
 }
 
 
